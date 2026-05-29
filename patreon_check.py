@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """
 Single-run Patreon membership checker — designed for GitHub Actions.
-Runs once, sends email if a spot is open, then exits.
+Runs once, sends email if the tier is no longer "Sold Out", then exits.
 EMAIL_PASSWORD is read from the environment (GitHub Secret).
+
+Detection strategy (tuned to the real page 2026-05-29):
+  - Tier "3月特別開放" currently shows "Sold Out" / "Limited spaces - SOLD OUT".
+  - ANCHOR text confirms the real membership page loaded (not a block/challenge page).
+  - If page loaded AND "sold out" is GONE  -> spot is OPEN -> alert.
+  - If page loaded AND "sold out" present  -> still full -> no alert.
+  - If ANCHOR missing                      -> page blocked/empty -> cannot verify, no alert.
 """
 
 import os
@@ -18,12 +25,20 @@ PATREON_URL    = "https://www.patreon.com/smalldragoninvest/membership?vanity=sm
 EMAIL_TO       = "jackycheung1984@gmail.com"
 EMAIL_FROM     = "jackycheung1984@gmail.com"
 EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
+
+# Text that proves the real membership page rendered:
+ANCHORS    = ["choose your membership", "研究中心", "3月特別開放"]
+# Text that means the tier is still full:
+SOLD_OUT   = ["sold out", "limited spaces"]
 # ────────────────────────────────────────────────────────────────────────────
 
 
-def scrape_page() -> tuple[bool, str]:
+def scrape_page() -> tuple[str, str]:
     """
-    Returns (spots_available, status_summary).
+    Returns (verdict, detail) where verdict is one of:
+      "OPEN"      -> tier no longer sold out, alert!
+      "FULL"      -> still sold out
+      "NOVERIFY"  -> page didn't load real content (blocked/empty)
     """
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -32,33 +47,28 @@ def scrape_page() -> tuple[bool, str]:
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/124.0.0.0 Safari/537.36"
-            )
+            ),
+            locale="en-US",
         )
         page.goto(PATREON_URL, wait_until="networkidle", timeout=45_000)
-        page.wait_for_timeout(3_000)
-        text = page.inner_text("body").lower()
+        page.wait_for_timeout(6_000)
+        raw  = page.inner_text("body")
         browser.close()
 
-    open_signals = [
-        "join for free", "become a patron", "subscribe",
-        "select", "join now", "get access",
-    ]
-    full_signals = [
-        "membership is full", "sold out", "no spots",
-        "waitlist", "join waitlist", "notify me",
-        "full membership", "limited availability",
-    ]
+    text     = raw.lower()
+    anchored = any(a.lower() in text for a in ANCHORS)
+    sold_out = any(s in text for s in SOLD_OUT)
 
-    is_full      = any(s in text for s in full_signals)
-    has_open_btn = any(s in text for s in open_signals)
+    # --- debug so we can see what the runner actually got ---
+    print(f"DEBUG page_len={len(raw)}  anchored={anchored}  sold_out={sold_out}")
+    print("DEBUG first 400 chars:\n" + raw[:400].replace("\n", " | "))
+    print("-" * 50)
 
-    if is_full and not has_open_btn:
-        return False, "full / waitlist only"
-    if has_open_btn and not is_full:
-        return True, "open — join button detected"
-    if has_open_btn and is_full:
-        return True, "mixed — at least one tier may be open"
-    return False, "unknown (no clear signals)"
+    if not anchored:
+        return "NOVERIFY", f"page did not load real content (len={len(raw)})"
+    if sold_out:
+        return "FULL", "tier still shows Sold Out"
+    return "OPEN", "Sold Out text GONE — spot likely open!"
 
 
 def send_email(subject: str, body: str):
@@ -80,24 +90,26 @@ def main():
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     print(f"[{now}] Checking {PATREON_URL}")
 
-    available, summary = scrape_page()
-    print(f"Status: {summary}")
+    verdict, detail = scrape_page()
+    print(f"VERDICT: {verdict} — {detail}")
 
-    if available:
-        subject = "🎉 Patreon smalldragoninvest — membership OPEN!"
+    if verdict == "OPEN":
+        subject = "🎉 Patreon 研究中心 — membership OPEN!"
         body = (
-            f"A membership spot is now available!\n\n"
+            f"The tier '3月特別開放' is no longer Sold Out!\n\n"
             f"Go join NOW:\n{PATREON_URL}\n\n"
             f"Detected at: {now}\n"
-            f"Status: {summary}\n\n"
-            f"(This alert fires every 15 min while spots remain open.)"
+            f"Detail: {detail}\n\n"
+            f"(This alert fires every 15 min while the spot stays open.)"
         )
         send_email(subject, body)
-        print("*** ALERT: Spot available! ***")
-        sys.exit(0)
+        print("*** ALERT: Spot available! Email sent. ***")
+    elif verdict == "NOVERIFY":
+        print("Could not verify page (possible IP block). No alert.")
     else:
-        print("No spots available. Next check in ~15 min.")
-        sys.exit(0)
+        print("Still Sold Out. Next check in ~15 min.")
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":
