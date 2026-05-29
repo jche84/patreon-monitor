@@ -31,4 +31,7 @@ jobs:
       - name: Check Patreon membership availability
         env:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+          PROXY_USER: ${{ secrets.PROXY_USER }}
+          PROXY_PASS: ${{ secrets.PROXY_PASS }}
         run: python patreon_check.py
